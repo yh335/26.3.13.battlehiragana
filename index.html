@@ -1,0 +1,191 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>일본어 발음 배틀</title>
+    <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-app.js";
+        import { getAuth, signInAnonymously } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-auth.js";
+        import { getFirestore, doc, setDoc, onSnapshot, updateDoc, collection, getDoc, runTransaction } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-firestore.js";
+
+        // 선생님의 실제 Firebase 설정값 적용 완료
+        const firebaseConfig = {
+            apiKey: "AIzaSyC2DjkYKZHH8MvxPrOSeWJBhrPNNDu-keY",
+            authDomain: "kana-battle.firebaseapp.com",
+            projectId: "kana-battle",
+            storageBucket: "kana-battle.firebasestorage.app",
+            messagingSenderId: "239059237650",
+            appId: "1:239059237650:web:20a96c0660fe2f6b7f11cb"
+        };
+
+        const app = initializeApp(firebaseConfig);
+        window.db = getFirestore(app);
+        window.auth = getAuth(app);
+        window.fb = { doc, setDoc, onSnapshot, updateDoc, collection, getDoc, runTransaction, signInAnonymously };
+    </script>
+</head>
+<body class="bg-slate-50">
+    <div id="root"></div>
+    <script type="text/babel">
+        const { useState, useEffect } = React;
+        const QUIZ_DATA = [
+            { id: 1, word: "さんぽ", question: "「ん」의 발음은?", options: ["ㅁ [m]", "ㄴ [n]"], correct: "ㅁ [m]" },
+            { id: 2, word: "あんない", question: "「ん」의 발음은?", options: ["ㄴ [n]", "ㅇ [ŋ]"], correct: "ㄴ [n]" },
+            { id: 3, word: "おんがく", question: "「ん」의 발음은?", options: ["ㅇ [ŋ]", "콧소리 [ɴ]"], correct: "ㅇ [ŋ]" },
+            { id: 4, word: "でんわ", question: "「ん」의 발음은?", options: ["ㄴ [n]", "콧소리 [ɴ]"], correct: "콧소리 [ɴ]" },
+            { id: 5, word: "えんぴつ", question: "「ん」의 발음은?", options: ["ㅁ [m]", "ㄴ [n]"], correct: "ㅁ [m]" }
+        ];
+
+        function App() {
+            const [user, setUser] = useState(null);
+            const [view, setView] = useState('LOBBY');
+            const [nickname, setNickname] = useState('');
+            const [roomCode, setRoomCode] = useState('');
+            const [roomData, setRoomData] = useState(null);
+            const [players, setPlayers] = useState([]);
+            const [feedback, setFeedback] = useState(null);
+
+            useEffect(() => {
+                window.fb.signInAnonymously(window.auth).then(res => setUser(res.user));
+            }, []);
+
+            useEffect(() => {
+                if (!roomCode || view === 'LOBBY') return;
+                const unsubRoom = window.fb.onSnapshot(window.fb.doc(window.db, "rooms", roomCode), (snap) => {
+                    if (snap.exists()) {
+                        const data = snap.data();
+                        setRoomData(data);
+                        if (data.status === 'PLAYING' && view !== 'GAME') setView('GAME');
+                        if (data.status === 'FINISHED') setView('RESULT');
+                    }
+                });
+                const unsubPlayers = window.fb.onSnapshot(window.fb.collection(window.db, "rooms", roomCode, "players"), (snap) => {
+                    setPlayers(snap.docs.map(d => ({ uid: d.id, ...d.data() })));
+                });
+                return () => { unsubRoom(); unsubPlayers(); };
+            }, [roomCode, view]);
+
+            const createRoom = async () => {
+                if (!nickname) return alert("이름을 입력하세요");
+                const code = Math.floor(1000 + Math.random() * 9000).toString();
+                await window.fb.setDoc(window.fb.doc(window.db, "rooms", code), {
+                    code, hostId: user.uid, status: 'WAITING', currentStage: 1
+                });
+                await window.fb.setDoc(window.fb.doc(window.db, "rooms", code, "players", user.uid), {
+                    nickname, score: 0, isHost: true
+                });
+                setRoomCode(code); setView('ROOM');
+            };
+
+            const joinRoom = async () => {
+                if (!nickname || !roomCode) return alert("이름과 코드를 확인하세요");
+                const snap = await window.fb.getDoc(window.fb.doc(window.db, "rooms", roomCode));
+                if (!snap.exists()) return alert("없는 방 번호입니다");
+                await window.fb.setDoc(window.fb.doc(window.db, "rooms", roomCode, "players", user.uid), {
+                    nickname, score: 0, isHost: false
+                });
+                setView('ROOM');
+            };
+
+            const handleChoice = async (choice) => {
+                if (feedback) return;
+                const quiz = QUIZ_DATA[roomData.currentStage - 1];
+                if (choice === quiz.correct) {
+                    setFeedback('win');
+                    const pRef = window.fb.doc(window.db, "rooms", roomCode, "players", user.uid);
+                    await window.fb.runTransaction(window.db, async (tx) => {
+                        const s = await tx.get(pRef);
+                        tx.update(pRef, { score: (s.data().score || 0) + 10 });
+                    });
+                    setTimeout(async () => {
+                        const next = roomData.currentStage + 1;
+                        const isEnd = next > QUIZ_DATA.length;
+                        await window.fb.updateDoc(window.fb.doc(window.db, "rooms", roomCode), {
+                            currentStage: isEnd ? roomData.currentStage : next,
+                            status: isEnd ? 'FINISHED' : 'PLAYING'
+                        });
+                        setFeedback(null);
+                    }, 800);
+                } else {
+                    setFeedback('wrong');
+                    setTimeout(() => setFeedback(null), 800);
+                }
+            };
+
+            if (view === 'LOBBY') return (
+                <div className="h-screen flex flex-col items-center justify-center p-6 bg-slate-50">
+                    <h1 className="text-4xl font-black text-indigo-600 mb-8">발음 배틀 ⚔️</h1>
+                    <input type="text" placeholder="내 이름" className="w-full max-w-xs p-4 rounded-xl border-2 mb-4" onChange={e => setNickname(e.target.value)} />
+                    <button onClick={createRoom} className="w-full max-w-xs py-4 bg-indigo-600 text-white font-bold rounded-xl mb-4">새 방 만들기</button>
+                    <div className="flex gap-2 w-full max-w-xs">
+                        <input type="text" placeholder="방 번호" className="flex-1 p-4 rounded-xl border-2" onChange={e => setRoomCode(e.target.value)} />
+                        <button onClick={joinRoom} className="px-6 bg-slate-800 text-white rounded-xl font-bold">입장</button>
+                    </div>
+                </div>
+            );
+
+            if (view === 'ROOM') return (
+                <div className="h-screen flex flex-col items-center justify-center p-6 bg-indigo-600 text-white">
+                    <p className="opacity-80 mb-2">우리 그룹 방 번호</p>
+                    <h2 className="text-7xl font-black mb-8">{roomCode}</h2>
+                    <div className="w-full max-w-xs bg-white/10 rounded-2xl p-4 mb-8">
+                        {players.map(p => <div key={p.uid} className="p-1 font-bold">👤 {p.nickname} {p.isHost && "👑"}</div>)}
+                    </div>
+                    {roomData?.hostId === user?.uid && (
+                        <button onClick={() => window.fb.updateDoc(window.fb.doc(window.db, "rooms", roomCode), {status: 'PLAYING'})} 
+                                className="w-full max-w-xs py-4 bg-yellow-400 text-black font-black rounded-xl">배틀 시작!</button>
+                    )}
+                </div>
+            );
+
+            if (view === 'GAME') {
+                const q = QUIZ_DATA[roomData.currentStage - 1];
+                return (
+                    <div className="h-screen flex flex-col bg-white">
+                        <div className="bg-slate-900 text-white p-6 pt-12 flex justify-between rounded-b-3xl">
+                            <span className="font-bold">Stage {roomData.currentStage}</span>
+                            <span className="font-bold text-yellow-400">점수: {players.find(p=>p.uid===user.uid)?.score}</span>
+                        </div>
+                        {feedback && (
+                            <div className={`fixed inset-0 z-50 flex items-center justify-center text-white text-6xl font-black ${feedback === 'win' ? 'bg-indigo-600/90' : 'bg-rose-600/90'}`}>
+                                {feedback === 'win' ? 'SUCCESS!' : 'WRONG!'}
+                            </div>
+                        )}
+                        <div className="flex-1 flex flex-col items-center justify-center p-6 text-center">
+                            <h2 className="text-7xl font-black mb-4">{q.word}</h2>
+                            <p className="text-xl font-bold text-slate-500">{q.question}</p>
+                        </div>
+                        <div className="p-6 grid gap-4 mb-8">
+                            {q.options.map(opt => (
+                                <button key={opt} onClick={() => handleChoice(opt)} className="p-5 bg-slate-100 rounded-2xl text-2xl font-black active:bg-indigo-600 active:text-white transition-all">{opt}</button>
+                            ))}
+                        </div>
+                    </div>
+                );
+            }
+
+            if (view === 'RESULT') return (
+                <div className="h-screen flex flex-col items-center justify-center p-6 bg-indigo-600 text-white">
+                    <h2 className="text-4xl font-black mb-8">배틀 결과</h2>
+                    <div className="w-full max-w-xs bg-white rounded-3xl p-6 text-black space-y-4">
+                        {players.sort((a,b)=>b.score-a.score).map((p, i) => (
+                            <div key={p.uid} className="flex justify-between font-bold">
+                                <span>{i+1}위 {p.nickname}</span>
+                                <span>{p.score}점</span>
+                            </div>
+                        ))}
+                    </div>
+                    <button onClick={() => window.location.reload()} className="mt-8 underline">처음으로</button>
+                </div>
+            );
+        }
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<App />);
+    </script>
+</body>
+</html>
